@@ -1,0 +1,10 @@
+{
+  "InstallDirectory" : "/apps/imctf/cad/script/Ferrari/",
+  "RunDirectory" : "/home/cadwork/leopeng/project/Ferrari/Test/",
+  "ProjectAndProcessInfo" : "/apps/imctf/cad/runset/project_version_runset",
+  "SleepTime" : "60",
+  "Projects" : [],
+  "Processes" : [],
+  "Versions" : [],
+  "LOGO" : "/apps/imctf/cad/script/pvpro/logo.gif"
+}
