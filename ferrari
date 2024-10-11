@@ -1,0 +1,2333 @@
+#!/bin/env python3.7
+
+import os
+import re
+import sys
+import json
+import stat
+import time
+import random
+import shutil
+import threading
+import tkinter.messagebox
+import tkinter as tk
+from tkinter import ttk
+from tkinter.filedialog import askdirectory
+from tkinter.filedialog import askopenfilename
+from tkinter.filedialog import asksaveasfilename
+from fnmatch import fnmatch
+
+
+def ImportJSON( path ):
+  read = open( path, "r" )
+  return json.load( read )
+
+def InitialTool( path ):
+
+  global gSleep
+  global gLogoPath
+  global gProjects
+  global gVersions
+  global gLayerMaps
+  global gProcesses
+  global gObjectMaps
+  global gDeckSettings
+  global gRunDirectoryRoot
+  global gInstallDirectoryRoot
+  global gProjectAndProcessInfo
+
+  setting = ImportJSON( path + "initial.json" )
+  gLayerMaps = ImportJSON( path + "layermap.json" )
+  gObjectMaps = ImportJSON( path + "objectmap.json" )
+  gDeckSettings = ImportJSON( path + "decksetting.json" )
+
+  
+  gLogoPath = "/home/cad1/ssfang/ferrari/logo.gif"
+  #gLogoPath = setting[ "LOGO" ]
+  gProjects = setting[ "Projects" ]
+  gVersions = setting[ "Versions" ]
+  gProcesses = setting[ "Processes" ]
+  gSleep = int( setting[ "SleepTime" ] )
+  gRunDirectoryRoot = setting[ "RunDirectory" ]
+  gCentrelUploadPath = setting[ "RunDirectory" ]
+  gInstallDirectoryRoot = setting[ "InstallDirectory" ]
+  gProjectAndProcessInfo = setting[ "ProjectAndProcessInfo" ]
+
+  gProjects.sort()
+
+def InitialProjectProcessAndMetalScheme():
+  global gProjects
+  global gProcesses
+  global gProcessToProject
+
+  read = open( gProjectAndProcessInfo, "r" )
+
+  for line in read.readlines():
+    matchObjects = re.match( r'^\s*([^#]\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', line )
+
+    if not matchObjects is None:
+      project = matchObjects.group( 1 )
+      version = matchObjects.group( 2 )
+      process = matchObjects.group( 3 )
+      metalScheme = matchObjects.group( 4 )
+
+      key = project.lower() + "," + version.lower() + "," + process.lower()
+
+      gProjects.append( project )
+      gProcesses.append( process )
+
+      gMetalSchemes[ key ] = metalScheme
+
+      if not gProcessToProject.__contains__( process ):
+        gProcessToProject[ process ] = []
+
+      gProcessToProject[ process ].append( project )
+
+  read.close()
+
+  gProjects = list( set( gProjects ) )
+  gProjects.sort()
+
+  gProcesses = list( set( gProcesses ) )
+  gProcesses.sort()
+
+  for key in gProcessToProject.keys():
+    gProcessToProject[ key ] = list( set( gProcessToProject[ key ] ) )
+    gProcessToProject[ key ].sort()
+
+  #print( gProcessToProject )
+  #print( gMetalSchemes )
+
+def GetProjects( event ):
+  project.set( "" )
+  version.set( "" )
+  #print(process.get())
+  projectCombobox[ "value" ] = gProcessToProject[ process.get() ]
+
+def GetVersions( event ):
+  version.set( "" )
+  gVersions.clear()
+
+  path = "/proj/" + project.get() + "/"
+
+  if os.path.exists( path ) and os.access( path, os.R_OK ):
+    for item in os.listdir( path ):
+      if os.path.isdir( path + item ) and item != "DBR":
+        gVersions.append( item )
+
+    gVersions.sort()
+    versionCombobox[ "value" ] = gVersions
+
+  elif not os.path.exists( path ):
+    tk.messagebox.showerror( "Error", "No project \"" + project.get() + "\"" )
+    project.set( "" )
+
+  elif not os.access( path, os.R_OK ):
+    tk.messagebox.showerror( "Error", "/proj/" + project.get() + " permission denined" )
+    project.set( "" )
+
+def GetCadenceLibraries( event ):
+  global gCadenceLibraries
+  global libs
+  libs = []
+  gCadenceLibraries.clear()
+
+  cdsLibPath = "/proj/" + project.get() + "/" + version.get() + "/libs/cds.lib"
+  #cdsLibPath = "/proj/dqpoa/V0/libs/cds.lib"
+
+  read = open( cdsLibPath, "r" )
+
+  for line in read.readlines():
+    matchObjects = re.match( r'^\s*DEFINE\s+(\S+)\s+(\S+)', line )
+
+    if not matchObjects is None:
+      libName = matchObjects.group( 1 )
+      libPath = matchObjects.group( 2 )
+
+      gCadenceLibraries[ libName ] = libPath
+
+  read.close()
+
+  for key in gCadenceLibraries.keys():
+    libs.append( key )
+
+  libs.sort()
+  libraryListBox.delete( 0, tk.END )
+
+  for lib in libs:
+    libraryListBox.insert( tk.END, lib )
+
+def GetLayerMap():
+
+  layermap = "/apps/imctf/libs/dfii/" + process.get() + "/current/" + project.get() + "/layer.map"
+
+  if os.path.exists( layermap ):
+    return layermap
+
+  else:
+    return gLayerMaps[ process.get() ]
+
+def GetMetalScheme():
+  key = project.get() + "," + version.get() + "," + process.get()
+  key = key.lower()
+
+  if key in gMetalSchemes.keys():
+    return gMetalSchemes[ key ]
+
+  else:
+    print( "[ERROR] Cannot find the metal scheme." )
+    print( "        Please check item \"ProjectAndProcessInfo\" in the initial.json" )
+
+def CheckFlag( path ):
+  if os.path.exists( path ):
+    #os.remove( path )
+    print( path )
+
+def CheckRunningStatus( path, sleepEvent ):
+  global gStop
+  global gSleep
+
+  while not gStop and not os.path.exists( path ):
+    sleepEvent.wait( gSleep )
+
+def CheckGDS():
+  global gStop
+
+  finishNormally = False
+
+  if gStop or not os.path.exists( runDirectory.get() + "/GDS/" + layoutTop.get() + ".gds" ):
+    gStop = True
+    #tk.messagebox.showerror( "Error","GDS stream out failed. Please check log file." )
+    gdsViewButton[ "fg" ] = "red"
+
+  else:
+    finishNormally = True
+    gdsViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def CheckCDL():
+  global gStop
+
+  finishNormally = False
+
+  if gStop or not os.path.exists( runDirectory.get() + "/CDL/" + schematicTop.get() + ".cdl" ):
+    gStop = True
+    #tk.messagebox.showerror( "Error","CDL stream out failed. Please check log file." )
+    cdlViewButton[ "fg" ] = "red"
+
+  else:
+    finishNormally = True
+    cdlViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def CheckDRC():
+  finishNormally = False
+
+  if gStop or not os.path.exists( runDirectory.get() + "/DRC/run.log" ):
+    #tk.messagebox.showerror( "Error","DRC did not start. Please check log file." )
+    drcViewButton[ "fg" ] = "red"
+  else:
+    finishNormally = True
+    drcViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def CheckANT():
+  finishNormally = False
+
+  if gStop or not os.path.exists( runDirectory.get() + "/ANT/run.log" ):
+    #tk.messagebox.showerror( "Error","ANT did not start. Please check log file." )
+    antViewButton[ "fg" ] = "red"
+  else:
+    finishNormally = True
+    antViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def CheckLVS():
+  finishNormally = False
+
+  if gStop or not os.path.exists( runDirectory.get() + "/LVS/run.log" ):
+    #tk.messagebox.showerror( "Error","LVS did not start. Please check log file." )
+    lvsViewButton[ "fg" ] = "red"
+  else:
+    error = False
+
+    read = open( runDirectory.get() + "/LVS/run.log", "r" )
+
+    for line in read.readlines():
+      if re.match( r'^\s*ERROR|^\s*Error|^\s*error', line ):
+        if not re.match( r'^\s*[Ee][Rr]{2}[Oo][Rr]\s+\(\s*\S+\s*,\s*\S+\s*\)\s+\d+\s+\S+', line ):
+          error = True
+
+    read.close()
+
+    if error:
+      lvsViewButton[ "fg" ] = "red"
+
+    else:
+      finishNormally = True
+      lvsViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def CheckERC():
+  finishNormally = False
+
+  if gStop or not os.path.exists( runDirectory.get() + "/ERC/run.log" ):
+    #tk.messagebox.showerror( "Error","ERC did not start. Please check log file." )
+    ercViewButton[ "fg" ] = "red"
+  else:
+    finishNormally = True
+    ercViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def CheckQRC():
+  finishNormally = False
+
+  if gStop or not os.path.exists( runDirectory.get() + "/QRC/run.log" ):
+    #tk.messagebox.showerror( "Error","QRC did not start. Please check log file." )
+    qrcViewButton[ "fg" ] = "red"
+  else:
+    finishNormally = True
+    qrcViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def CheckLVL():
+  finishNormally = False
+
+  if gStop or not os.path.exists( gLVLCalibreRunLogPath ) or not os.path.exists( gLVLCalibreDatabasePath ):
+    #tk.messagebox.showerror( "Error","LVL did not start. Please check log file." )
+    lvlViewButton[ "fg" ] = "red"
+
+  else:
+    error = False
+
+    read = open( gLVLCalibreRunLogPath, "r" )
+
+    for line in read.readlines():
+      if re.match( r'^\s*ERROR|^\s*Error|^\s*error', line ):
+        if not re.match( r'^\s*[Ee][Rr]{2}[Oo][Rr]\s+\(\s*\S+\s*,\s*\S+\s*\)\s+\d+\s+\S+', line ):
+          error = True
+
+    read.close()
+
+    if error:
+      lvlViewButton[ "fg" ] = "red"
+    else:
+      finishNormally = True
+      lvlViewButton[ "fg" ] = "green"
+
+  return finishNormally
+
+def SelectLayoutLibrary():
+  if layoutLibrary.get() != "" and os.path.exists( layoutLibrary.get() ):
+    initPath = layoutLibrary.get()
+  else:
+    initPath = "/proj/" + project.get() + "/" + version.get() + "/libs/"
+
+  path = askdirectory( initialdir = initPath )
+
+  if len( path ) > 0:
+    tokens = re.split( r'\/', path )
+    size = len( tokens )
+
+    if tokens[ size - 1 ] != "layout":
+      tk.messagebox.showerror( "Error", path + " is not a valid path" )
+      return
+
+    layoutLibrary.set( tokens[ size - 3 ] )
+    layoutTop.set( tokens[ size - 2 ] )
+    layoutView.set( tokens[ size - 1 ] )
+
+def SelectSchematicLibrary():
+  if schematicLibrary.get() != "" and os.path.exists( schematicLibrary.get() ):
+    initPath = schematicLibrary.get()
+  else:
+    initPath = "/proj/" + project.get() + "/" + version.get() + "/libs/"
+
+  path = askdirectory( initialdir = initPath )
+
+  if len( path ) > 0:
+    tokens = re.split( r'\/', path )
+    size = len( tokens )
+
+    if tokens[ size - 1 ] != "schematic":
+      tk.messagebox.showerror( "Error", path + " is not a valid path" )
+      return
+
+    schematicLibrary.set( tokens[ size - 3 ] )
+    schematicTop.set( tokens[ size - 2 ] )
+    schematicView.set( tokens[ size - 1 ] )
+
+def SelectLVLDatabase():
+  path = askopenfilename( filetypes = ( ( "GDS", "*.gds" ), ( "ALL", "*" ) ) )
+
+  if len( path ) > 0:
+    lvlDatabase.set( path )
+    lvlTop.set( re.sub( "\.\S+$", "", os.path.basename( path ) ) )
+
+def SelectLVLDatabaseWithThread():
+  thread = threading.Thread( target = SelectLVLDatabase )
+  thread.start()
+
+def SelectRunDirectory():
+  #runDirectory.set( gRunDirectoryRoot + "/" + process.get() + "/" + project.get() + "/" + version.get() + "/" + timeStamp + "/" )
+  #runDirectory.set( "/proj/" + project.get() + "/" + version.get() + "/ver/dbrsignoff/" + timeStamp + "/" )
+  #runDirectory.set( "/proj/" + project.get() + "/DBR/" + version.get() + "/" + timeStamp + "/" )
+  
+  runDirectory.set( os.getcwd() + "/ferrari_temp" )
+  if os.path.exists( runDirectory.get() ):
+    if os.path.exists( runDirectory.get()+"_bk" ):
+      shutil.rmtree( runDirectory.get()+"_bk" )
+    runDir = runDirectory.get()
+    os.system( "mv -f "+ runDir +" "+ runDir + "_bk" )
+
+def SelectVirtuosoLibrary():
+  #print( "/proj/" + project.get() + "/" + version.get() + "/libs/cds.lib" )
+  return "/proj/" + project.get() + "/" + version.get() + "/libs/cds.lib"
+
+def RunEDATool( button, progressBar, flag, command, tool ):
+  global gStop
+
+  if gStop:
+    return
+
+  else:
+    toolFinishNormally = False
+    sleepEvent = threading.Event()
+    gSleepEvents.append( sleepEvent )
+
+    if not button is None:
+      button[ "state" ] = "disabled"
+
+    progressBar.start()
+    CheckFlag( flag )
+    os.system( command )
+    CheckRunningStatus( flag, sleepEvent )
+
+    if gStop:
+      read = open( gTmpDirectory + tool + ".job", "r" )
+      jobInfo = read.readline()
+      read.close()
+      matchObjs = re.match( r'Job\s+<(\d+)>\s+is', jobInfo )
+      jobId = matchObjs.group( 1 )
+      print( "Kill " + tool + " which job id is " + jobId )
+      os.system( "bkill " + jobId )
+
+    if tool == "DRC":
+      toolFinishNormally = CheckDRC()
+
+    elif tool == "ANT":
+      toolFinishNormally = CheckANT()
+
+    elif tool == "LVS":
+      toolFinishNormally = CheckLVS()
+
+    elif tool == "ERC":
+      toolFinishNormally = CheckERC()
+
+    elif tool == "QRC":
+      toolFinishNormally = CheckQRC()
+
+    elif tool == "LVL":
+      toolFinishNormally = CheckLVL()
+
+    if not button is None and toolFinishNormally:
+      button[ "state" ] = "normal"
+
+    progressBar.stop()
+
+def RunRVE( argv ):
+  os.system( argv )
+
+def MonitorRunningState():
+  global gThreads
+
+  for thread in gThreads:
+    thread.join()
+
+  runButton[ 'state' ] = "normal"
+  uploadButton[ "state" ] = "normal"
+  layoutFileButton[ "state" ] = "normal"
+  layoutLibraryButton[ "state" ] = "normal"
+  schematicFileButton[ "state" ] = "normal"
+  schematicLibraryButton[ "state" ] = "normal"
+  lvlDatabaseButton[ "state" ] = "normal"
+  TurnOnOffUserInput( "normal" )
+
+  tk.messagebox.showinfo( "Info", "DBR Signoff Finished" )
+
+def CheckBeforeRunning():
+  global gModes
+
+  detectError = False
+
+  errorMessages = "Detect following errors:"
+
+  if process.get() == "":
+    detectError = True
+    errorMessages = errorMessages + "\n  * No process"
+
+  if project.get() == "":
+    detectError = True
+    errorMessages = errorMessages + "\n  * No project"
+
+  if version.get() == "":
+    detectError = True
+    errorMessages = errorMessages + "\n  * No version"
+
+  if layoutLibrary.get() == "" and layoutFile.get() == "":
+    detectError = True
+
+    mode = gModes[ id( layoutFrames ) ]
+
+    if mode == 0:
+      error = "* No layout library"
+
+    elif mode == 1:
+      error = "* No layout file"
+
+    errorMessages = errorMessages + "\n  " + error
+
+  if schematicLibrary.get() == "" and schematicFile.get() == "":
+    detectError = True
+
+    mode = gModes[ id( schematicFrames ) ]
+
+    if mode == 0:
+      error = "* No schematic library"
+
+    elif mode == 1:
+      error = "* No schematic file"
+
+    errorMessages = errorMessages + "\n  " + error
+
+  #if lvlDatabase.get() == "":
+  #  detectError = True
+  #  errorMessages = errorMessages + "\n  * No LVL database"
+
+  #if lvlTop.get() == "":
+  #  detectError = True
+  #  errorMessages = errorMessages + "\n  * No LVL top"
+
+  if not os.path.exists( "/proj/" + project.get() + "/DBR/" ):
+    detectError = True
+    errorMessages = errorMessages + "\n  * Path /proj/" + project.get() + "/DBR/" + " doesn't exist! Please contact HF Design Center CAD1 member"
+
+  if detectError:
+    tk.messagebox.showerror( "Error", errorMessages )
+
+  return detectError
+
+def TurnOnOffUserInput( state ):
+  processCombobox[ "state" ] = state
+  projectCombobox[ "state" ] = state
+  versionCombobox[ "state" ] = state
+
+  layoutLibraryEntry[ "state" ] = state
+  layoutTopEntry[ "state" ] = state
+  layoutViewEntry[ "state" ] = state
+  layoutFileEntry[ "state" ] = state
+  layoutTopEntry1[ "state" ] = state
+  schematicLibraryEntry[ "state" ] = state
+  schematicTopEntry[ "state" ] = state
+  schematicViewEntry[ "state" ] = state
+  schematicFileEntry[ "state" ] = state
+  schematicTopEntry1[ "state" ] = state
+  lvlDatabaseEntry[ "state" ] = state
+  lvlTopEntry[ "state" ] = state
+
+def CreateWorkingEnvironment():
+  global gGdsDirectory
+  global gCdlDirectory
+  global gTmpDirectory
+
+  gGdsDirectory = runDirectory.get() + "/GDS/"
+  gCdlDirectory = runDirectory.get() + "/CDL/"
+  gTmpDirectory = runDirectory.get() + "/TMP/"
+
+  os.makedirs( runDirectory.get() )
+  os.makedirs( gGdsDirectory )
+  os.makedirs( gCdlDirectory )
+  os.makedirs( gTmpDirectory )
+  os.makedirs( runDirectory.get() + "/DRC/" )
+  os.makedirs( runDirectory.get() + "/ANT/" )
+  os.makedirs( runDirectory.get() + "/LVS/" )
+  os.makedirs( runDirectory.get() + "/ERC/" )
+  os.makedirs( runDirectory.get() + "/QRC/" )
+  os.makedirs( runDirectory.get() + "/LVL/" )
+
+  Chmod( runDirectory.get(), 755 )
+
+def WriteEDASettingWithJSON():
+  edaToolSetting = {}
+  edaToolSetting.setdefault( "Process", process.get() )
+  edaToolSetting.setdefault( "Project", project.get() )
+  edaToolSetting.setdefault( "Version", version.get() )
+  edaToolSetting.setdefault( "MetalScheme", gMetalScheme )
+  edaToolSetting.setdefault( "LayerMap", gLayerMap )
+  edaToolSetting.setdefault( "VirtuosoLibrary", gVirtuosoLibrary )
+  edaToolSetting.setdefault( "LayoutLibrary", layoutLibrary.get() )
+  edaToolSetting.setdefault( "LayoutTop", layoutTop.get() )
+  edaToolSetting.setdefault( "LayoutView", layoutView.get() )
+  edaToolSetting.setdefault( "SchematicLibrary", schematicLibrary.get() )
+  edaToolSetting.setdefault( "SchematicTop", schematicTop.get() )
+  edaToolSetting.setdefault( "SchematicView", schematicView.get() )
+  edaToolSetting.setdefault( "GDS", gGdsDirectory + layoutTop.get() + ".gds" )
+  edaToolSetting.setdefault( "GDSTOP", layoutTop.get() )
+  edaToolSetting.setdefault( "SPICE",  gCdlDirectory + schematicTop.get() + ".cdl" )
+  edaToolSetting.setdefault( "SPICETOP", schematicTop.get() )
+  edaToolSetting.setdefault( "RunDirectory", runDirectory.get() )
+
+  write = open( gTmpDirectory + "edaToolSetting.json", "w" )
+  write.write( json.dumps( edaToolSetting ) )
+  write.close()
+
+  #print( edaToolSetting )
+
+def Chmod( path, permission ):
+  owner = int( permission / 100 )
+  group = int( ( permission - owner * 100 ) / 10 )
+  other = int( ( permission - owner * 100 - group * 10 ) )
+
+  if owner > 7 or group > 7 or other > 7:
+    print( "Wrong permission " + str( permission ) )
+    return
+
+  else:
+    owner = '{:b}'.format( owner )
+    group = '{:b}'.format( group )
+    other = '{:b}'.format( other )
+
+    permission = int( owner[ 2 ] ) * 256 + \
+                 int( owner[ 1 ] ) * 128 + \
+                 int( owner[ 0 ] ) *  64 + \
+                 int( group[ 2 ] ) *  32 + \
+                 int( group[ 1 ] ) *  16 + \
+                 int( group[ 0 ] ) *   8 + \
+                 int( other[ 2 ] ) *   4 + \
+                 int( other[ 1 ] ) *   2 + \
+                 int( other[ 0 ] ) *   1
+
+    os.chmod( path, permission )
+
+def InitializeStreamOutGDS():
+
+  path = runDirectory.get() + "/GDS/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/GDS/\n" )
+  write.write( gInstallDirectoryRoot + "/IMCP/vir/strmGDS/strmGDS.py input.js |& tee run.log\n" )
+  write.write( "md5sum " + layoutTop.get() + ".gds > " + layoutTop.get() + ".md5\n" )
+  write.write( "touch GDS_DONE\n" )
+  write.write( "bkill `cat " + runDirectory.get() + "/TMP/GDS.job | awk '{print $2}' | sed 's/[<>]//g'`\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  path = runDirectory.get() + "/GDS/input.js"
+
+  write = open( path, "w" )
+
+  write.write( "{\n" )
+  write.write( "  \"cdsDir\" : \"/proj/" + project.get() + "/" + version.get() + "/libs/\",\n" )
+  write.write( "  \"libName\" : \"" + layoutLibrary.get() + "\",\n" )
+  write.write( "  \"cellName\" : \"" + layoutTop.get() + "\",\n" )
+  write.write( "  \"viewName\" : \"" + layoutView.get() + "\",\n" )
+  write.write( "  \"runDir\" : \"./\",\n" )
+  write.write( "  \"outDir\" : \"./\",\n" )
+  write.write( "  \"layerMap\" : \"" + gLayerMap + "\"" )
+
+  if process.get() in gObjectMaps.keys():
+    write.write( ",\n" )
+    write.write( "  \"objectMap\" : \"" + gObjectMaps[ process.get() ] + "\"\n" )
+
+  else:
+    write.write( "\n" )
+
+  write.write( "}\n" )
+
+  write.close()
+
+def InitializeCopyGDS():
+
+  path = runDirectory.get() + "/GDS/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/GDS/\n" )
+  write.write( "cp -rp " + layoutFile.get() + " .\n" )
+  write.write( "touch GDS_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+def InitializeStreamOutCDL():
+
+  path = runDirectory.get() + "/CDL/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/CDL/\n" )
+  write.write( gInstallDirectoryRoot + "/IMCP/vir/strmCDL/strmCDL.py input.js |& tee run.log\n" )
+  write.write( "mv ./temp_strmCDL/" + schematicTop.get() + ".cdl ./\n" )
+  write.write( "md5sum " + schematicTop.get() + ".cdl > " + schematicTop.get() + ".md5\n" )
+  write.write( "touch CDL_DONE\n" )
+  write.write( "bkill `cat " + runDirectory.get() + "/TMP/CDL.job | awk '{print $2}' | sed 's/[<>]//g'`\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  path = runDirectory.get() + "/CDL/input.js"
+
+  write = open( path, "w" )
+
+  write.write( "{\n" )
+  write.write( "  \"cdsLib\" : \"/proj/" + project.get() + "/" + version.get() + "/libs/cds.lib\",\n" )
+  write.write( "  \"libName\" : \"" + schematicLibrary.get() + "\",\n" )
+  write.write( "  \"cellName\" : \"" + schematicTop.get() + "\",\n" )
+  write.write( "  \"viewName\" : \"" + schematicView.get() + "\",\n" )
+  write.write( "  \"model\" : \"LVS\",\n" )
+  write.write( "  \"runDir\" : \"./\",\n" )
+  write.write( "  \"incFile\" : \"/apps/imctf/runset/calibre/" + process.get() + "/current/common/empty_device.spi\",\n" )
+
+  if os.path.exists( "/proj/" + project.get() + "/" + version.get() + "/setup/.simrc.cdl" ):
+    write.write( "  \"simrc\" : \"/proj/" + project.get() + "/" + version.get() + "/setup/.simrc.cdl\"\n" )
+
+  else:
+    write.write( "  \"simrc\" : \"/proj/" + project.get() + "/" + version.get() + "/setup/.simrc\"\n" )
+
+  write.write( "}\n" )
+
+  write.close()
+
+def InitializeCopyCDL():
+
+  path = runDirectory.get() + "/CDL/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/CDL/\n" )
+  write.write( "cp -rp " + schematicFile.get() + " .\n" )
+  write.write( "touch CDL_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+def InitializeDRC():
+  #os.makedirs( runDirectory.get() + "DRC/" )
+  #deck = "/apps/imctf/runset/calibre/" + process.get() + "/current/" + gMetalScheme + "/calibreDRC.rule"
+  deck = "/apps/imctf/cad/runset/" + project.get() + "/" + version.get().lower() + "/current/calibreDRC.rule"
+  path = runDirectory.get() + "/DRC/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/DRC/\n" )
+  write.write( "calibre -drc -hier -turbo calibreDRC.rule |& tee run.log\n" )
+  write.write( "touch DRC_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  switchIfElseCount = 0
+
+  read = open( deck, "r" )
+  write = open( runDirectory.get() + "/DRC/calibreDRC.rule", "w" )
+
+  for line in read.readlines():
+
+    if re.match( r'^\s*LAYOUT\s+PATH\s+\"\S+\"', line ) :
+      line = "LAYOUT PATH \"" + runDirectory.get() + "/GDS/" + layoutTop.get() + ".gds\"\n"
+
+    elif re.match( r'^\s*LAYOUT\s+PRIMARY\s+\S+', line ):
+      line = "LAYOUT PRIMARY \"" + layoutTop.get() + "\"\n"
+
+    elif re.match( r'^\s*DRC\s+RESULTS\s+DATABASE\s+\"\S+\"', line ):
+      line = "DRC RESULTS DATABASE \"" + layoutTop.get() + ".drc.results\" ASCII\n"
+
+    elif re.match( r'^\s*DRC\s+SUMMARY\s+REPORT\s+\"\S+\"', line ):
+      line = "DRC SUMMARY REPORT \"" + layoutTop.get() + ".drc.summary\" HIER\n"
+
+    elif re.match( r'^\s*#IFDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#IFNDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#ELSE', line ):
+      pass
+
+    elif re.match( r'^\s*#ENDIF', line ):
+      switchIfElseCount -= 1
+
+    else:
+
+      matchObjects = re.match( r'^(\/\/)?\s*#(UN)?DEFINE\s+(\S+)', line )
+
+      if matchObjects:
+        switch = matchObjects.group( 3 )
+
+        if ( ( "drc" in gDeckSettings[ project.get() ] ) \
+             and \
+             ( switch in gDeckSettings[ project.get() ][ "drc" ][ "switch" ].keys() ) \
+           ):
+
+          if switchIfElseCount == 0:
+
+            if matchObjects.group( 2 ) is None:
+              if gDeckSettings[ project.get() ][ "drc" ][ "switch" ][ switch ] == "on":
+                line = "#DEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "drc" ][ "switch" ][ switch ] == "off":
+                line = "//#DEFINE " + switch + "\n"
+
+            else:
+              if gDeckSettings[ project.get() ][ "drc" ][ "switch" ][ switch ] == "on":
+                line = "//#UNDEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "drc" ][ "switch" ][ switch ] == "off":
+                line = "#UNDEFINE " + switch + "\n"
+
+    write.write( line )
+
+  read.close()
+  write.close()
+
+def InitializeANT():
+  #os.makedirs( runDirectory.get() + "/ANT/" )
+  #deck = "/apps/imctf/runset/calibre/" + process.get() + "/current/" + gMetalScheme + "/calibreANT.rule"
+  deck = "/apps/imctf/cad/runset/" + project.get() + "/" + version.get().lower() + "/current/calibreANT.rule"
+  path = runDirectory.get() + "/ANT/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/ANT/\n" )
+  write.write( "calibre -drc -hier -turbo calibreANT.rule |& tee run.log\n" )
+  write.write( "touch ANT_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  switchIfElseCount = 0
+
+  read = open( deck, "r" )
+  write = open( runDirectory.get() + "/ANT/calibreANT.rule", "w" )
+
+  for line in read.readlines():
+
+    if re.match( r'^\s*LAYOUT\s+PATH\s+\"\S+\"', line ) :
+      line = "LAYOUT PATH \"" + runDirectory.get() + "/GDS/" + layoutTop.get() + ".gds\"\n"
+
+    elif re.match( r'^\s*LAYOUT\s+PRIMARY\s+\S+', line ):
+      line = "LAYOUT PRIMARY \"" + layoutTop.get() + "\"\n"
+
+    elif re.match( r'^\s*DRC\s+RESULTS\s+DATABASE\s+\"\S+\"', line ):
+      line = "DRC RESULTS DATABASE \"" + layoutTop.get() + ".ant.results\" ASCII\n"
+
+    elif re.match( r'^\s*DRC\s+SUMMARY\s+REPORT\s+\"\S+\"', line ):
+      line = "DRC SUMMARY REPORT \"" + layoutTop.get() + ".ant.summary\" HIER\n"
+
+    elif re.match( r'^\s*#IFDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#IFNDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#ELSE', line ):
+      pass
+
+    elif re.match( r'^\s*#ENDIF', line ):
+      switchIfElseCount -= 1
+
+    else:
+
+      matchObjects = re.match( r'^(\/\/)?\s*#(UN)?DEFINE\s+(\S+)', line )
+
+      if matchObjects:
+        switch = matchObjects.group( 3 )
+
+        if ( ( "ant" in gDeckSettings[ project.get() ] ) \
+             and \
+             ( switch in gDeckSettings[ project.get() ][ "ant" ][ "switch" ].keys() ) \
+           ):
+
+          if switchIfElseCount == 0:
+
+            if matchObjects.group( 2 ) is None:
+              if gDeckSettings[ project.get() ][ "ant" ][ "switch" ][ switch ] == "on":
+                line = "#DEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "ant" ][ "switch" ][ switch ] == "off":
+                line = "//#DEFINE " + switch + "\n"
+
+            else:
+              if gDeckSettings[ project.get() ][ "ant" ][ "switch" ][ switch ] == "on":
+                line = "//#UNDEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "ant" ][ "switch" ][ switch ] == "off":
+                line = "#UNDEFINE " + switch + "\n"
+
+    write.write( line )
+
+  read.close()
+  write.close()
+
+def InitializeLVS():
+  #os.makedirs( runDirectory.get() + "/LVS/" )
+  #deck = "/apps/imctf/runset/calibre/" + process.get() + "/current/" + gMetalScheme + "/calibreLVS.rule"
+  deck = "/apps/imctf/cad/runset/" + project.get() + "/" + version.get().lower() + "/current/calibreLVS.rule"
+  path = runDirectory.get() + "/LVS/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/LVS/\n" )
+  write.write( "calibre -lvs -hier -turbo calibreLVS.rule |& tee run.log\n" )
+  write.write( "touch LVS_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  switchIfElseCount = 0
+
+  read = open( deck, "r" )
+  write = open( runDirectory.get() + "/LVS/calibreLVS.rule", "w" )
+
+  for line in read.readlines():
+
+    if re.match( r'^\s*LAYOUT\s+PATH\s+\"\S+\"', line ) :
+      line = "LAYOUT PATH \"" + runDirectory.get() + "/GDS/" + layoutTop.get() + ".gds\"\n"
+
+    elif re.match( r'^\s*LAYOUT\s+PRIMARY\s+\S+', line ):
+      line = "LAYOUT PRIMARY \"" + layoutTop.get() + "\"\n"
+
+    elif re.match( r'^\s*SOURCE\s+PATH\s+\"\S+\"', line ):
+      line = "SOURCE PATH \"" + runDirectory.get() + "/CDL/" + schematicTop.get() + ".cdl\n"
+
+    elif re.match( r'^\s*SOURCE\s+PRIMARY\s+\"\S+\"', line ):
+      line = "SOURCE PRIMARY \"" + schematicTop.get() + "\"\n"
+
+    elif re.match( r'^\s*LVS\s+REPORT\s+\"\S+\"', line ):
+      line = "LVS REPORT \"" + layoutTop.get() + ".lvs.rep\"\n"
+
+    elif re.match( r'^\s*#IFDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#IFNDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#ELSE', line ):
+      pass
+
+    elif re.match( r'^\s*#ENDIF', line ):
+      switchIfElseCount -= 1
+
+    else:
+
+      matchObjects = re.match( r'^(\/\/)?\s*#(UN)?DEFINE\s+(\S+)', line )
+
+      if matchObjects:
+        switch = matchObjects.group( 3 )
+
+        if ( ( "lvs" in gDeckSettings[ project.get() ] ) \
+             and \
+             ( switch in gDeckSettings[ project.get() ][ "lvs" ][ "switch" ].keys() ) \
+           ):
+
+          if switchIfElseCount == 0:
+
+            if matchObjects.group( 2 ) is None:
+              if gDeckSettings[ project.get() ][ "lvs" ][ "switch" ][ switch ] == "on":
+                line = "#DEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "lvs" ][ "switch" ][ switch ] == "off":
+                line = "//#DEFINE " + switch + "\n"
+
+            else:
+              if gDeckSettings[ project.get() ][ "lvs" ][ "switch" ][ switch ] == "on":
+                line = "//#UNDEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "lvs" ][ "switch" ][ switch ] == "off":
+                line = "#UNDEFINE " + switch + "\n"
+
+    write.write( line )
+
+  read.close()
+  write.close()
+
+def InitializeERC():
+  #os.makedirs( runDirectory.get() + "/ERC/" )
+  #deck = "/apps/imctf/runset/calibre/" + process.get() + "/current/" + gMetalScheme + "/calibreERC.rule"
+  deck = "/apps/imctf/cad/runset/" + project.get() + "/" + version.get().lower() + "/current/calibreERC.rule"
+  path = runDirectory.get() + "/ERC/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/ERC/\n" )
+  write.write( "calibre -drc -hier -turbo calibreERC.rule |& tee run.log\n" )
+  write.write( "touch ERC_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  switchIfElseCount = 0
+
+  read = open( deck, "r" )
+  write = open( runDirectory.get() + "/ERC/calibreERC.rule", "w" )
+
+  for line in read.readlines():
+
+    if re.match( r'^\s*LAYOUT\s+PATH\s+\"\S+\"', line ) :
+      line = "LAYOUT PATH \"" + runDirectory.get() + "/GDS/" + layoutTop.get() + ".gds\"\n"
+
+    elif re.match( r'^\s*LAYOUT\s+PRIMARY\s+\S+', line ):
+      line = "LAYOUT PRIMARY \"" + layoutTop.get() + "\"\n"
+
+    elif re.match( r'^\s*SOURCE\s+PATH\s+\"\S+\"', line ):
+      line = "SOURCE PATH \"" + runDirectory.get() + "/CDL/" + schematicTop.get() + ".cdl\n"
+
+    elif re.match( r'^\s*SOURCE\s+PRIMARY\s+\"\S+\"', line ):
+      line = "SOURCE PRIMARY \"" + schematicTop.get() + "\"\n"
+
+    elif re.match( r'^\s*DRC\s+RESULTS\s+DATABASE\s+\"\S+\"', line ):
+      line = "DRC RESULTS DATABASE \"" + layoutTop.get() + ".erc.out\" ASCII\n"
+
+    elif re.match( r'^\s*DRC\s+SUMMARY\s+REPORT\s+\"\S+\"', line ):
+      line = "DRC SUMMARY REPORT \"" + layoutTop.get() + ".erc.rep\" HIER\n"
+
+    elif re.match( r'^\s*ERC\s+RESULTS\s+DATABASE\s+\"\S+\"', line ):
+      line = "ERC RESULTS DATABASE \"" + layoutTop.get() + ".erc.out\" ASCII\n"
+
+    elif re.match( r'^\s*ERC\s+SUMMARY\s+REPORT\s+\"\S+\"', line ):
+      line = "ERC SUMMARY REPORT \"" + layoutTop.get() + ".erc.rep\" HIER\n"
+
+    elif re.match( r'^\s*#IFDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#IFNDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#ELSE', line ):
+      pass
+
+    elif re.match( r'^\s*#ENDIF', line ):
+      switchIfElseCount -= 1
+
+    else:
+
+      matchObjects = re.match( r'^(\/\/)?\s*#(UN)?DEFINE\s+(\S+)', line )
+
+      if matchObjects:
+        switch = matchObjects.group( 3 )
+
+        if ( ( "erc" in gDeckSettings[ project.get() ] ) \
+             and \
+             ( switch in gDeckSettings[ project.get() ][ "erc" ][ "switch" ].keys() ) \
+           ):
+
+          if switchIfElseCount == 0:
+
+            if matchObjects.group( 2 ) is None:
+              if gDeckSettings[ project.get() ][ "erc" ][ "switch" ][ switch ] == "on":
+                line = "#DEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "erc" ][ "switch" ][ switch ] == "off":
+                line = "//#DEFINE " + switch + "\n"
+
+            else:
+              if gDeckSettings[ project.get() ][ "erc" ][ "switch" ][ switch ] == "on":
+                line = "//#UNDEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "erc" ][ "switch" ][ switch ] == "off":
+                line = "#UNDEFINE " + switch + "\n"
+
+    write.write( line )
+
+  read.close()
+  write.close()
+
+def InitializeQRC():
+  #os.makedirs( runDirectory.get() + "/QRC/" )
+  #deck = "/apps/imctf/runset/calibre/" + process.get() + "/current/" + gMetalScheme + "/quality_check/calibreDRC_qualityCHK.rule"
+  deck = "/apps/imctf/cad/runset/" + project.get() + "/" + version.get().lower() + "/current/quality_check/calibreDRC_qualityCHK.rule"
+  path = runDirectory.get() + "/QRC/run.csh"
+
+  write = open( path, "w" )
+
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/QRC/\n" )
+  write.write( "calibre -drc -hier -turbo calibreDRC_qualityCHK.rule |& tee run.log\n" )
+  write.write( "touch QRC_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  switchIfElseCount = 0
+
+  read = open( deck, "r" )
+  write = open( runDirectory.get() + "/QRC/calibreDRC_qualityCHK.rule", "w" )
+
+  for line in read.readlines():
+
+    if re.match( r'^\s*LAYOUT\s+PATH\s+\"\S+\"', line ) :
+      line = "LAYOUT PATH \"" + runDirectory.get() + "/GDS/" + layoutTop.get() + ".gds\"\n"
+
+    elif re.match( r'^\s*LAYOUT\s+PRIMARY\s+\S+', line ):
+      line = "LAYOUT PRIMARY \"" + layoutTop.get() + "\"\n"
+
+    elif re.match( r'^\s*DRC\s+RESULTS\s+DATABASE\s+\"\S+\"', line ):
+      line = "DRC RESULTS DATABASE \"" + layoutTop.get() + ".quality.results\" ASCII\n"
+
+    elif re.match( r'^\s*DRC\s+SUMMARY\s+REPORT\s+\"\S+\"', line ):
+      line = "DRC SUMMARY REPORT \"" + layoutTop.get() + ".quality.summary\" HIER\n"
+
+    elif re.match( r'^\s*#IFDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#IFNDEF', line ):
+      switchIfElseCount += 1
+
+    elif re.match( r'^\s*#ELSE', line ):
+      pass
+
+    elif re.match( r'^\s*#ENDIF', line ):
+      switchIfElseCount -= 1
+
+    else:
+
+      matchObjects = re.match( r'^(\/\/)?\s*#(UN)?DEFINE\s+(\S+)', line )
+
+      if matchObjects:
+        switch = matchObjects.group( 3 )
+
+        if ( ( "qrc" in gDeckSettings[ project.get() ] ) \
+             and \
+             ( switch in gDeckSettings[ project.get() ][ "qrc" ][ "switch" ].keys() ) \
+           ):
+
+          if switchIfElseCount == 0:
+
+            if matchObjects.group( 2 ) is None:
+              if gDeckSettings[ project.get() ][ "qrc" ][ "switch" ][ switch ] == "on":
+                line = "#DEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "qrc" ][ "switch" ][ switch ] == "off":
+                line = "//#DEFINE " + switch + "\n"
+
+            else:
+              if gDeckSettings[ project.get() ][ "qrc" ][ "switch" ][ switch ] == "on":
+                line = "//#UNDEFINE " + switch + "\n"
+
+              elif gDeckSettings[ project.get() ][ "qrc" ][ "switch" ][ switch ] == "off":
+                line = "#UNDEFINE " + switch + "\n"
+
+    write.write( line )
+
+  read.close()
+  write.close()
+
+def InitializeLVL():
+  global gLVLCalibreRunLogPath
+  global gLVLCalibreDatabasePath
+  #os.makedirs( runDirectory.get() + "/LVL/" )
+
+  temp = ""
+  gds = gGdsDirectory + layoutTop.get() + ".gds"
+
+  if process.get() == "imc19n_TX":
+    temp = "imc19n"
+  else:
+    temp = process.get()
+
+  path = runDirectory.get() + "/LVL/run.csh"
+  write = open( path, "w" )
+  write.write( "#!/bin/csh -f\n" )
+  write.write( "cd " + runDirectory.get() + "/LVL/\n" )
+  #write.write( "/apps/cad/bin/runlvl -p " + temp + " -gds1 " + gds + " -top1 " + layoutTop.get() + " -gds2 " + lvlDatabase.get() + " -top2 " + lvlTop.get() + " -mode hier |& tee run.log\n" )
+  write.write( "/apps/cad/bin/runlvl -proc " + temp + " -proj " + project.get().lower() + " -gds1 " + gds + " -top1 " + layoutTop.get() + " -gds2 " + lvlDatabase.get() + " -top2 " + lvlTop.get() + " -mode hier |& tee run.log\n" )
+  write.write( "touch LVL_DONE\n" )
+  write.write( "exit\n\n" )
+
+  write.close()
+
+  Chmod( path, 755 )
+
+  gLVLCalibreRunLogPath = runDirectory.get() + "/LVL/run.log"
+  gLVLCalibreDatabasePath = runDirectory.get() + "/LVL/" + layoutTop.get() + "_" + lvlTop.get() + ".lvl.results"
+
+def ViewGDSLog():
+  os.system( "gvim " + runDirectory.get() + "/GDS/run.log" )
+
+def ViewCDLLog():
+  os.system( "gvim " + runDirectory.get() + "/CDL/run.log" )
+
+def ViewDRCLog():
+  if drcViewButton[ 'fg' ] == "green":
+    os.system( "gvim " + runDirectory.get() + "/DRC/" + layoutTop.get() + ".drc.summary" )
+
+  else:
+    os.system( "gvim " + runDirectory.get() + "/DRC/run.log" )
+
+def ViewANTLog():
+  if antViewButton[ 'fg' ] == "green":
+    os.system( "gvim " + runDirectory.get() + "/ANT/" + layoutTop.get() + ".ant.summary" )
+
+  else:
+   os.system( "gvim " + runDirectory.get() + "/ANT/run.log" )
+
+def ViewLVSLog():
+  if lvsViewButton[ 'fg' ] == "green":
+    os.system( "gvim " + runDirectory.get() + "/LVS/" + layoutTop.get() + ".lvs.rep" )
+
+  else:
+   os.system( "gvim " + runDirectory.get() + "/LVS/run.log" )
+
+def ViewERCLog():
+  if ercViewButton[ 'fg' ] == "green":
+    os.system( "gvim " + runDirectory.get() + "/ERC/" + layoutTop.get() + ".erc.rep" )
+
+  else:
+   os.system( "gvim " + runDirectory.get() + "/ERC/run.log" )
+
+def ViewQRCLog():
+  if qrcViewButton[ 'fg' ] == "green":
+    os.system( "gvim " + runDirectory.get() + "/QRC/" + layoutTop.get() + ".quality.summary" )
+
+  else:
+   os.system( "gvim " + runDirectory.get() + "/QRC/run.log" )
+
+def ViewLVLLog():
+  if lvlViewButton[ 'fg' ] == "green":
+    os.system( "gvim " + runDirectory.get() + "/LVL/" + layoutTop.get() + "_" + lvlTop.get() + ".lvl.sum" )
+
+  else:
+   os.system( "gvim " + runDirectory.get() + "/LVL/run.log" )
+
+def ViewDRCRVE():
+  command = "calibre -rve " + runDirectory.get() + "/DRC/" + layoutTop.get() + ".drc.results"
+
+  thread = threading.Thread( target = RunRVE, args = ( command, ) )
+  thread.start()
+
+def ViewANTRVE():
+  command = "calibre -rve " + runDirectory.get() + "/ANT/" + layoutTop.get() + ".ant.results"
+
+  thread = threading.Thread( target = RunRVE, args = ( command, ) )
+  thread.start()
+
+def ViewLVSRVE():
+  command = "calibre -rve " + runDirectory.get() + "/LVS/svdb"
+
+  thread = threading.Thread( target = RunRVE, args = ( command, ) )
+  thread.start()
+
+def ViewERCRVE():
+  #command = "calibre -rve " + runDirectory.get() + "/ERC/svdb"
+  command = "calibre -rve " + runDirectory.get() + "/ERC/" + layoutTop.get() + ".erc.out"
+
+  thread = threading.Thread( target = RunRVE, args = ( command, ) )
+  thread.start()
+
+def ViewQRCRVE():
+  command = "calibre -rve " + runDirectory.get() + "/QRC/" + layoutTop.get() + ".quality.results"
+
+  thread = threading.Thread( target = RunRVE, args = ( command, ) )
+  thread.start()
+
+def ViewLVLRVE():
+  command = "calibre -rve " + gLVLCalibreDatabasePath
+
+  thread = threading.Thread( target = RunRVE, args = ( command, ) )
+  thread.start()
+
+def DisableButtons():
+  runButton[ "state" ] = "disabled"
+  uploadButton[ "state" ] = "disable"
+  layoutFileButton[ "state" ] = "disabled"
+  layoutLibraryButton[ "state" ] = "disabled"
+  schematicFileButton[ "state" ] = "disabled"
+  schematicLibraryButton[ "state" ] = "disabled"
+  lvlDatabaseButton[ "state" ] = "disabled"
+  drcRVEButton[ "state" ] = "disabled"
+  antRVEButton[ "state" ] = "disabled"
+  lvsRVEButton[ "state" ] = "disabled"
+  ercRVEButton[ "state" ] = "disabled"
+  qrcRVEButton[ "state" ] = "disabled"
+  lvlRVEButton[ "state" ] = "disabled"
+
+def ResetViewButtons():
+  gdsViewButton[ "fg" ] = "black"
+  cdlViewButton[ "fg" ] = "black"
+  drcViewButton[ "fg" ] = "black"
+  antViewButton[ "fg" ] = "black"
+  lvsViewButton[ "fg" ] = "black"
+  ercViewButton[ "fg" ] = "black"
+  qrcViewButton[ "fg" ] = "black"
+  lvlViewButton[ "fg" ] = "black"
+
+def Start():
+
+  global gStop
+  global gModes
+  global gThreads
+  global gLayerMap
+  global gMetalScheme
+  global gVirtuosoLibrary
+
+  if CheckBeforeRunning():
+    return
+
+  gStop = False
+  gLayerMap = GetLayerMap()
+  gMetalScheme = GetMetalScheme()
+
+  SelectRunDirectory()
+  gVirtuosoLibrary = SelectVirtuosoLibrary()
+  CreateWorkingEnvironment()
+  WriteEDASettingWithJSON()
+  WriteSetting( runDirectory.get() + "/TMP/setting.json" )
+
+  TurnOnOffUserInput( "readonly" )
+  DisableButtons()
+  ResetViewButtons()
+
+  GetLayout()
+  #InitializeStreamOutGDS()
+
+  GetSchematic()
+  #InitializeStreamOutCDL()
+
+  gdsFinishFlag = runDirectory.get() + "/GDS/GDS_DONE"
+  cdlFinishFlag = runDirectory.get() + "/CDL/CDL_DONE"
+
+  gdsCommand = "bsub -n 1 -R \"affinity[core(32)]\" " + runDirectory.get() + "/GDS/run.csh > " + gTmpDirectory + "GDS.job"
+  cdlCommand = "bsub -n 1 -R \"affinity[core(32)]\" " + runDirectory.get() + "/CDL/run.csh > " + gTmpDirectory + "CDL.job"
+
+  threadGDS = threading.Thread( target = RunEDATool, args = ( None, gdsProgressbar, gdsFinishFlag, gdsCommand, "GDS" ) )
+  threadCDL = threading.Thread( target = RunEDATool, args = ( None, cdlProgressbar, cdlFinishFlag, cdlCommand, "CDL" ) )
+
+  gThreads.clear()
+
+  gThreads.append( threadGDS )
+  gThreads.append( threadCDL )
+
+  threadGDS.start()
+  threadCDL.start()
+
+  threadGDS.join()
+  threadCDL.join()
+
+  if not CheckGDS():
+    tk.messagebox.showerror( "Error","GDS stream out failed. Please check log file." )
+
+  if not CheckCDL():
+    tk.messagebox.showerror( "Error","CDL stream out failed. Please check log file." )
+
+  if not gStop:
+    InitializeDRC()
+    InitializeANT()
+    InitializeLVS()
+    InitializeERC()
+    InitializeQRC()
+    InitializeLVL()
+
+    drcFinishFlag = runDirectory.get() + "/DRC/DRC_DONE"
+    antFinishFlag = runDirectory.get() + "/ANT/ANT_DONE"
+    lvsFinishFlag = runDirectory.get() + "/LVS/LVS_DONE"
+    ercFinishFlag = runDirectory.get() + "/ERC/ERC_DONE"
+    qrcFinishFlag = runDirectory.get() + "/QRC/QRC_DONE"
+    lvlFinishFlag = runDirectory.get() + "/LVL/LVL_DONE"
+
+    drcCommand = "bsub -q drc -n 4 -R \"affinity[core(32)]\" " + runDirectory.get() + "/DRC/run.csh > " + gTmpDirectory + "DRC.job"
+    antCommand = "bsub -q drc -n 1 -R \"affinity[core(32)]\" " + runDirectory.get() + "/ANT/run.csh > " + gTmpDirectory + "ANT.job"
+    lvsCommand = "bsub -q lvs -n 16 -R \"affinity[core(32)]\" " + runDirectory.get() + "/LVS/run.csh > " + gTmpDirectory + "LVS.job"
+    ercCommand = "bsub -q lvs -n 1 -R \"affinity[core(32)]\" " + runDirectory.get() + "/ERC/run.csh > " + gTmpDirectory + "ERC.job"
+    qrcCommand = "bsub -q drc -n 1 -R \"affinity[core(32)]\" " + runDirectory.get() + "/QRC/run.csh > " + gTmpDirectory + "QRC.job"
+    lvlCommand = "bsub -q drc -n 1 -R \"affinity[core(32)]\" " + runDirectory.get() + "/LVL/run.csh > " + gTmpDirectory + "LVL.job"
+
+    threadDRC = threading.Thread( target = RunEDATool, args = ( drcRVEButton, drcProgressbar, drcFinishFlag, drcCommand, "DRC" ) )
+    threadANT = threading.Thread( target = RunEDATool, args = ( antRVEButton, antProgressbar, antFinishFlag, antCommand, "ANT" ) )
+    threadLVS = threading.Thread( target = RunEDATool, args = ( lvsRVEButton, lvsProgressbar, lvsFinishFlag, lvsCommand, "LVS" ) )
+    threadERC = threading.Thread( target = RunEDATool, args = ( ercRVEButton, ercProgressbar, ercFinishFlag, ercCommand, "ERC" ) )
+    threadQRC = threading.Thread( target = RunEDATool, args = ( qrcRVEButton, qrcProgressbar, qrcFinishFlag, qrcCommand, "QRC" ) )
+    threadLVL = threading.Thread( target = RunEDATool, args = ( lvlRVEButton, lvlProgressbar, lvlFinishFlag, lvlCommand, "LVL" ) )
+
+    threadMonitor = threading.Thread( target = MonitorRunningState )
+
+    gThreads.clear()
+
+    gThreads.append( threadDRC )
+    gThreads.append( threadANT )
+    gThreads.append( threadLVS )
+    gThreads.append( threadERC )
+    gThreads.append( threadDRC )
+    gThreads.append( threadLVL )
+
+    threadDRC.start()
+    threadANT.start()
+    threadLVS.start()
+    threadERC.start()
+    threadQRC.start()
+    threadLVL.start()
+
+    threadMonitor.start()
+
+def Upload():
+  timeStamp = time.strftime( "%Y%m%d_%H%M%S", time.localtime() )
+  centrelPath = "/proj/" + project.get() + "/DBR/" + version.get() + "/" + timeStamp
+  #runDirectory.set( "/proj/" + project.get() + "/DBR/" + version.get() + "/" + timeStamp + "/" )
+  shutil.copytree( runDirectory.get(), centrelPath )
+  tk.messagebox.showinfo( "Info", "Upload to %s finished" % ( centrelPath ) )
+
+def Run():
+  threadStart = threading.Thread( target = Start )
+  threadStart.start()
+
+def Stop():
+  global gStop
+  global gThreads
+  global gSleepEvents
+
+  gStop = True
+
+  for sleepEvent in gSleepEvents:
+    sleepEvent.set()
+
+  for thread in gThreads:
+    thread.join( 1 )
+
+  if runButton[ "state" ] == "disabled":
+    shutil.rmtree( runDirectory.get() )
+    runButton[ "state" ] = "normal"
+    uploadButton[ "state" ] = "normal"
+    layoutFileButton[ "state" ] = "normal"
+    layoutLibraryButton[ "state" ] = "normal"
+    schematicFileButton[ "state" ] = "normal"
+    schematicLibraryButton[ "state" ] = "normal"
+    lvlDatabaseButton[ "state" ] = "normal"
+    TurnOnOffUserInput( "normal" )
+
+def WriteSetting( path ):
+
+  layoutMode = gModes[ id( layoutFrames ) ]
+  schematicMode = gModes[ id( schematicFrames ) ]
+
+  write = open( path, "w" )
+  write.write( "{\n" )
+  write.write( "  \"Process\" : \"" + process.get() + "\",\n" )
+  write.write( "  \"Project\" : \"" + project.get() + "\",\n" )
+  write.write( "  \"Version\" : \"" + version.get() + "\",\n" )
+  write.write( "  \"MetalScheme\" : \"" + gMetalScheme + "\",\n" )
+  write.write( "  \"LayerMap\" : \"" + gLayerMap + "\",\n" )
+  write.write( "  \"LayoutMode\" : \"" + str( gModes[ id( layoutFrames ) ] ) + "\",\n" )
+  write.write( "  \"SchematicMode\" : \"" + str( gModes[ id( schematicFrames ) ] ) + "\",\n" )
+  write.write( "  \"VirtuosoLibrary\" : \"" + gVirtuosoLibrary + "\",\n" )
+
+  if layoutMode == 0:
+    write.write( "  \"LayoutLibrary\" : \"" + layoutLibrary.get() + "\",\n" )
+    write.write( "  \"LayoutView\" : \"" + layoutView.get() + "\",\n" )
+
+  elif layoutMode == 1:
+    write.write( "  \"LayoutFile\" : \"" + layoutFile.get() + "\",\n" )
+
+  write.write( "  \"LayoutTop\" : \"" + layoutTop.get() + "\",\n" )
+
+  if schematicMode == 0:
+    write.write( "  \"SchematicLibrary\" : \"" + schematicLibrary.get() + "\",\n" )
+    write.write( "  \"SchematicView\" : \"" + schematicView.get() + "\",\n" )
+
+  elif schematicMode == 1:
+    write.write( "  \"SchematicFile\" : \"" + schematicFile.get() + "\",\n" )
+
+  write.write( "  \"SchematicTop\" : \"" + schematicTop.get() + "\",\n" )
+  write.write( "  \"LVLDatabase\" : \"" + lvlDatabase.get() + "\",\n" )
+  write.write( "  \"LVLTop\" : \"" + lvlTop.get() + "\",\n" )
+  write.write( "  \"RunDirectory\" : \"" + runDirectory.get() + "\"\n" )
+  write.write( "}\n" )
+  write.close()
+
+def DefaultSetting():
+
+  process.set( "" )
+  project.set( "" )
+  version.set( "" )
+  layoutTop.set( "" )
+  layoutFile.set( "" )
+  layoutView.set( "" )
+  layoutLibrary.set( "" )
+  schematicTop.set( "" )
+  schematicFile.set( "" )
+  schematicView.set( "" )
+  schematicLibrary.set( "" )
+  lvlDatabase.set( "" )
+  lvlTop.set( "" )
+
+  gVirtuosoLibrary = ""
+  gRunDirectoryRoot = ""
+
+  ChangeMode( layoutFrames, 1, 0 )
+  ChangeMode( schematicFrames, 2, 0 )
+
+def LoadSetting( path ):
+  global gVirtuosoLibrary
+  global gLVLCalibreRunLogPath
+  global gLVLCalibreDatabasePath
+
+  DefaultSetting()
+
+  layoutMode = 0
+  schematicMode = 0
+
+  setting = ImportJSON( path )
+
+  if "LayoutMode" in setting: 
+    layoutMode = int( setting[ "LayoutMode" ] )
+
+  if "SchematicMode" in setting:
+    schematicMode = int( setting[ "SchematicMode" ] )
+
+  if "LayoutLibrary" in setting:
+    layoutLibrary.set( setting[ "LayoutLibrary" ] )
+
+  if "LayoutFile" in setting:
+    layoutFile.set( setting[ "LayoutFile" ] )
+
+  if "LayoutView" in setting:
+    layoutView.set( setting[ "LayoutView" ] )
+
+  if "SchematicLibrary" in setting:
+    schematicLibrary.set( setting[ "SchematicLibrary" ] )
+
+  if "SchematicFile" in setting:
+    schematicFile.set( setting[ "SchematicFile" ] )
+
+  if "SchematicView" in setting:
+    schematicView.set( setting[ "SchematicView" ] )
+
+  if "RunDirectory" in setting:
+    runDirectory.set( setting[ "RunDirectory" ] )
+
+  process.set( setting[ "Process" ] )
+  GetProjects( None )
+  project.set( setting[ "Project" ] )
+  GetVersions( None )
+  version.set( setting[ "Version" ] )
+  GetCadenceLibraries( None )
+  layoutTop.set( setting[ "LayoutTop" ] )
+  schematicTop.set( setting[ "SchematicTop" ] )
+  lvlDatabase.set( setting[ "LVLDatabase" ] )
+  lvlTop.set( setting[ "LVLTop" ] )
+
+  gVirtuosoLibrary = setting[ "VirtuosoLibrary" ]
+  gLVLCalibreRunLogPath = runDirectory.get() + "/LVL/run.log"
+  gLVLCalibreDatabasePath = runDirectory.get() + "/LVL/" + layoutTop.get() + "_" + lvlTop.get() + ".lvl.results"
+
+  ChangeMode( layoutFrames, 1, layoutMode )
+  ChangeMode( schematicFrames, 2, schematicMode )
+
+def Save():
+  path = asksaveasfilename( filetypes = ( ( "JSON", "*.json" ), ( "ALL", "*" ) ) )
+
+  if len( path ) == 0:
+    tk.messagebox.showinfo( "Warning", "Please choose a file." )
+
+  elif CheckBeforeRunning():
+    return
+
+  else:
+    WriteSetting( path )
+
+    #write = open( path, "w" )
+    #write.write( "{\n" )
+    #write.write( "  \"Process\" : \"" + process.get() + "\",\n" )
+    #write.write( "  \"Project\" : \"" + project.get() + "\",\n" )
+    #write.write( "  \"Version\" : \"" + version.get() + "\",\n" )
+    #write.write( "  \"MetalScheme\" : \"" + gMetalScheme + "\",\n" )
+    #write.write( "  \"LayerMap\" : \"" + gLayerMap + "\",\n" )
+    #write.write( "  \"VirtuosoLibrary\" : \"" + gVirtuosoLibrary + "\",\n" )
+    #write.write( "  \"LayoutLibrary\" : \"" + layoutLibrary.get() + "\",\n" )
+    #write.write( "  \"LayoutTop\" : \"" + layoutTop.get() + "\",\n" )
+    #write.write( "  \"LayoutView\" : \"" + layoutView.get() + "\",\n" )
+    #write.write( "  \"SchematicLibrary\" : \"" + schematicLibrary.get() + "\",\n" )
+    #write.write( "  \"SchematicTop\" : \"" + schematicTop.get() + "\",\n" )
+    #write.write( "  \"SchematicView\" : \"" + schematicView.get() + "\",\n" )
+    #write.write( "  \"LVLDatabase\" : \"" + lvlDatabase.get() + "\",\n" )
+    #write.write( "  \"LVLTop\" : \"" + lvlTop.get() + "\"\n" )
+    #write.write( "}\n" )
+    #write.close()
+
+    tk.messagebox.showinfo( "Info", "Done.\nSave file to " + path + "." )
+
+def Load():
+  global gVirtuosoLibrary
+
+  path = askopenfilename( filetypes = ( ( "JSON", "*.json" ), ( "ALL", "*" ) ) )
+
+  if len( path ) == 0:
+    tk.messagebox.showinfo( "Warning", "Please choose a file." )
+
+  else:
+    LoadSetting( path )
+
+    CheckGDS()
+    CheckCDL()
+
+    if CheckDRC():
+      drcRVEButton[ "state" ] = "normal"
+
+    if CheckANT():
+      antRVEButton[ "state" ] = "normal"
+
+    if CheckLVS():
+      lvsRVEButton[ "state" ] = "normal"
+
+    if CheckERC():
+      ercRVEButton[ "state" ] = "normal"
+
+    if CheckQRC():
+      qrcRVEButton[ "state" ] = "normal"
+
+    if CheckLVL():
+      lvlRVEButton[ "state" ] = "normal"
+
+    tk.messagebox.showinfo( "Info", "Done." )
+
+def OpenUserguide():
+  os.system( "/usr/bin/evince " + gInstallDirectoryRoot + "/Ferrari_Userguide.pdf &" )
+
+def SelectLibraryInListBox( event ):
+  global cells
+  selectedItem = event.widget.get( tk.ANCHOR )
+  #print(selectedItem)
+  #SelectedItem is what user clicked.
+  if selectedItem != "":
+    cells = []
+
+    if gSelectLayoutOrSchematic == "layout":
+      layoutLibrary.set( selectedItem )
+
+    elif gSelectLayoutOrSchematic == "schematic":
+      schematicLibrary.set( selectedItem )
+
+    else:
+      print( "ERROR" )
+
+    #librarySearchKey.set( selectedItem )
+
+    topListBox.delete( 0, tk.END )
+
+    path = gCadenceLibraries[ selectedItem ]
+
+    if os.path.exists( path ) and os.access( path, os.R_OK ):
+      for cell in os.listdir( path ):
+        if not "." in cell:
+          cells.append( cell )
+
+      cells.sort()
+
+      for cell in cells:
+        topListBox.insert( tk.END, cell )
+
+    else:
+      if not os.path.exists( path ):
+        print( "[ERROR] " + path + " doesn't exist" )
+
+      elif not os.access( path, os.R_OK ):
+        print( "[ERROR] " + path + " isn't readable" )
+
+def SelectTopInListBox( event ):
+  global views
+  selectedItem = event.widget.get( tk.ANCHOR )
+
+  if selectedItem != "":
+    views = []
+
+    if gSelectLayoutOrSchematic == "layout":
+      layoutTop.set( selectedItem )
+
+    elif gSelectLayoutOrSchematic == "schematic":
+      schematicTop.set( selectedItem )
+
+    else:
+      print( "ERROR" )
+
+    #topSearchKey.set( selectedItem )
+
+    viewListBox.delete( 0, tk.END )
+
+    path = gCadenceLibraries[ libraryListBox.get( tk.ANCHOR ) ] + "/" + selectedItem
+
+    if os.path.exists( path ) and os.access( path, os.R_OK ):
+      for view in os.listdir( path ):
+        if not "." in view:
+          views.append( view )
+
+      views.sort()
+
+      for view in views:
+        viewListBox.insert( tk.END, view )
+
+    else:
+      if not os.path.exists( path ):
+        print( "[ERROR] " + path + " doesn't exist" )
+
+      elif not os.access( path, os.R_OK ):
+        print( "[ERROR] " + path + " isn't readable" )
+
+def SelectViewInListBox( event ):
+
+  selectedItem = event.widget.get( tk.ANCHOR )
+
+  if selectedItem != "":
+
+    if gSelectLayoutOrSchematic == "layout":
+      layoutView.set( event.widget.get( tk.ANCHOR ) )
+
+    elif gSelectLayoutOrSchematic == "schematic":
+      schematicView.set( event.widget.get( tk.ANCHOR ) )
+
+    else:
+      print( "ERROR" )
+
+    #viewSearchKey.set( selectedItem )
+
+def ConfirmSelection( event ):
+  subWindow.withdraw()
+
+def SelectLayout():
+
+  global gSelectLayoutOrSchematic
+
+  mode = gModes[ id( layoutFrames ) ]
+
+  if mode == 0:
+    gSelectLayoutOrSchematic = "layout"
+    subWindow.deiconify()
+
+  elif mode == 1:
+    path = askopenfilename( filetypes = ( ( "GDS", "*.gds" ), ( "ALL", "*" ) ) )
+
+    if len( path ) > 0:
+      layoutFile.set( path )
+      layoutTop.set( re.sub( "\.\S+$", "", os.path.basename( path ) ) )
+
+    else:
+      pass
+
+def SelectSchematic():
+
+  global gSelectLayoutOrSchematic
+
+  mode = gModes[ id( schematicFrames ) ]
+
+  if mode == 0:
+    gSelectLayoutOrSchematic = "schematic"
+    subWindow.deiconify()
+
+  elif mode == 1:
+    path = askopenfilename( filetypes = ( ( "CDL", "*.cdl" ), ( "SPI", "*.spi" ), ( "ALL", "*" ) ) )
+
+    if len( path ) > 0:
+      schematicFile.set( path )
+      schematicTop.set( re.sub( "\.\S+$", "", os.path.basename( path ) ) )
+
+    else:
+      pass
+
+def SearchWithWildCard( key, candidates ):
+  searchResult = []
+  for i in range( 0, len( candidates ) ):
+    if fnmatch( candidates[ i ], key ):
+      searchResult.append( candidates[ i ] )
+  return  searchResult
+
+def SearchItem(items, itemBox, searchKey):
+    itemBox.delete( 0,tk.END )
+    for i in items:
+        itemBox.insert( tk.END, i )
+    items = itemBox.get( 0, tk.END )
+    index = SearchWithWildCard( searchKey.get(), items )
+    itemBox.selection_clear( 0, tk.END )
+
+    if len( index ) != 0:
+        itemBox.delete( 0, tk.END )
+        for i in index:
+            itemBox.insert( tk.END, i )
+        itemBox.event_generate( "<<ListboxSelect>>" )
+
+def SearchLibrary( event ):
+    global libs
+    SearchItem( libs, libraryListBox, librarySearchKey )
+
+def SearchTop( event ):
+    global cells
+    SearchItem( cells, topListBox, topSearchKey )
+
+def SearchView( event ):
+    global views
+    SearchItem( views, viewListBox, viewSearchKey )
+    
+#def SearchLibrary( event ):
+#  global libs
+#  libraryListBox.delete( 0, tk.END )
+#  for lib in libs:
+#    libraryListBox.insert( tk.END, lib )
+#  libs = libraryListBox.get( 0, tk.END ) 
+#  index = SearchWithWildCard( librarySearchKey.get(), libs )
+#  libraryListBox.selection_clear(0, tk.END)
+#
+#  if len( index ) != 0:
+#    libraryListBox.delete( 0, tk.END )
+#    for i in index:
+#      libraryListBox.insert( tk.END, i )
+#    libraryListBox.event_generate( "<<ListboxSelect>>" )
+#
+#def SearchTop( event ):
+#  global cells
+#  topListBox.delete( 0, tk.END )
+#  for cell in cells:
+#    topListBox.insert( tk.END, cell )
+#  tops = topListBox.get( 0, tk.END )
+#  index = SearchWithWildCard( topSearchKey.get(), tops )
+#  topListBox.selection_clear(0, tk.END)
+#
+#  if len( index ) != 0:
+#    topListBox.delete( 0, tk.END )
+#    for i in range( 0, len( index ) ):
+#      topListBox.insert( tk.END, index[ i ] )
+#    topListBox.event_generate( "<<ListboxSelect>>" )
+#
+#def SearchView( event ):
+#  global views
+#  viewListBox.delete( 0, tk.END )
+#  for view in views:
+#    viewListBox.insert( tk.END, view )
+#  views = viewListBox.get( 0, tk.END )
+#  index = SearchWithWildCard( viewSearchKey.get(), views )
+#  viewListBox.selection_clear( 0, tk.END )
+#
+#  if len( index ) != 0:
+#    viewListBox.delete( 0, tk.END )
+#    for i in range( 0, len( index ) ):
+#      viewListBox.insert( tk.END, index[ i ] )
+#    viewListBox.event_generate( "<<ListboxSelect>>" )
+
+
+def ChangeMode( frames, row, mode = -1 ):
+
+  global gModes
+
+  currentMode = gModes[ id( frames ) ]
+
+  if mode == -1:
+    mode = gModes[ id( frames ) ]
+    mode = ( mode + 1 ) % len( frames )
+
+  frames[ currentMode ].grid_forget()
+  frames[ mode ].grid( row = row, column = 0, sticky = "w" )
+
+  gModes[ id( frames ) ] = mode
+
+def GetLayout():
+
+  global gModes
+
+  mode = gModes[ id( layoutFrames ) ]
+
+  if mode == 0:
+    InitializeStreamOutGDS()
+
+  elif mode == 1:
+    InitializeCopyGDS()
+
+def GetSchematic():
+
+  global gModes
+
+  mode = gModes[ id( schematicFrames ) ]
+
+  if mode == 0:
+    InitializeStreamOutCDL()
+
+  elif mode == 1:
+    InitializeCopyCDL()
+
+gSleep = 0
+gLayoutMode = 0
+gSchematicMode = 0
+
+gStop = False
+
+gLogoPath = ""
+gLayerMap = ""
+gObjectMap = "/apps/imctf/libs/dfii/imc19n/current/object.map"
+gMetalScheme = ""
+gCdlDirectory = ""
+gGdsDirectory = ""
+gTmpDirectory = ""
+gVirtuosoLibrary = ""
+gRunDirectoryRoot = ""
+gCentrelUploadPath = ""
+gSearchLogoFilePath = "/apps/imctf/cad/script/Ferrari/icons/search.gif"
+gInstallDirectoryRoot = "/apps/imctf/cad/script/Ferrari/"
+gLVLCalibreRunLogPath = ""
+gProjectAndProcessInfo = ""
+gLVLCalibreDatabasePath = ""
+gSelectLayoutOrSchematic = ""
+
+gThreads = list()
+gProjects = list()
+gVersions = list()
+gProcesses = list()
+gSleepEvents = list()
+
+gModes = dict()
+gLayerMaps = dict()
+gObjectMaps = dict()
+gDeckSettings = dict()
+gMetalSchemes = dict()
+gCadenceLibraries = dict()
+gProcessToProject = dict()
+
+if __name__ == "__main__":
+
+  InitialTool( gInstallDirectoryRoot )
+  InitialProjectProcessAndMetalScheme()
+
+  print( "Initialize..." )
+
+  labelWidth = 20
+  labelAnchor = "w"
+
+  entryWidth = 80
+  entryAnchor = "w"
+
+  comboboxWidth = 30
+
+  window = tk.Tk()
+  window.geometry( "1440x720" )
+  window.title( "Ferrari - DBR Signoff" )
+
+  menubar = tk.Menu( window )
+
+  fileMenu = tk.Menu( window )
+  fileMenu.add_command( label = "Load", command = Load )
+  fileMenu.add_command( label = "Save", command = Save )
+  fileMenu.add_command( label = "Exit", command = exit )
+
+  windowMenu = tk.Menu( window )
+  windowMenu.add_command( label = "Layout", command = lambda : ChangeMode( layoutFrames, 1 ) )
+  windowMenu.add_command( label = "Schematic", command = lambda : ChangeMode( schematicFrames, 2 ) )
+
+  menubar.add_cascade( label = "File", menu = fileMenu )
+  menubar.add_cascade( label = "Window", menu = windowMenu )
+
+  window[ "menu" ] = menubar
+
+  initialFrame = tk.Frame( window )
+  initialFrame.grid( row = 0, column = 0, sticky = "w" )
+
+  logoFrame = tk.Frame( window )
+  logoFrame.grid( row = 0, column = 1, sticky = "w" )
+
+  layoutFrames = dict()
+
+  layoutFrame0 = tk.Frame( window )
+  layoutFrame0.grid( row = 1, column = 0, sticky = "w" )
+
+  layoutFrame1 = tk.Frame( window )
+  #layoutFrame1.grid( row = 1, column = 0, sticky = "w" )
+
+  layoutFrames[ 0 ] = layoutFrame0
+  layoutFrames[ 1 ] = layoutFrame1
+
+  gModes[ id( layoutFrames ) ] = 0
+
+  functionFrame1 = tk.Frame( window )
+  functionFrame1.grid( row = 1, column = 1, sticky = "w" )
+
+  schematicFrames = dict()
+
+  schematicFrame0 = tk.Frame( window )
+  schematicFrame0.grid( row = 2, column = 0, sticky = "w" )
+
+  schematicFrame1 = tk.Frame( window )
+  #schematicFrame1.grid( row = 2, column = 0, sticky = "w" )
+
+  schematicFrames[ 0 ] = schematicFrame0
+  schematicFrames[ 1 ] = schematicFrame1
+
+  gModes[ id( schematicFrames ) ] = 0
+
+  functionFrame2 = tk.Frame( window )
+  functionFrame2.grid( row = 2, column = 1, sticky = "w" )
+
+  lvlFrame = tk.Frame( window )
+  lvlFrame.grid( row = 3, column = 0, sticky = "w" )
+
+  functionFrame3 = tk.Frame( window )
+  functionFrame3.grid( row = 3, column = 1, sticky = "w" )
+
+  resultFrame = tk.Frame( window )
+  resultFrame.grid( row = 4, column = 0, sticky = "w" )
+
+  process = tk.StringVar()
+  project = tk.StringVar()
+  version = tk.StringVar()
+
+  processLabel = tk.Label( initialFrame, text = "Process", width = labelWidth, anchor = labelAnchor )
+  processLabel.grid( row = 0, column = 0 )
+
+  processCombobox = ttk.Combobox( initialFrame, textvariable = process, width = comboboxWidth )
+  processCombobox[ "value" ] = gProcesses
+  processCombobox.bind( "<<ComboboxSelected>>", GetProjects )
+  processCombobox.grid( row = 0, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  projectLabel = tk.Label( initialFrame, text = "Project", width = labelWidth, anchor = labelAnchor )
+  projectLabel.grid( row = 1, column = 0, sticky = "w" )
+
+  projectCombobox = ttk.Combobox( initialFrame, textvariable = project, width = comboboxWidth )
+  projectCombobox[ "value" ] = gProjects
+  projectCombobox.bind( "<<ComboboxSelected>>", GetVersions )
+  projectCombobox.grid( row = 1, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  versionLabel = tk.Label( initialFrame, text = "Version", width = labelWidth, anchor = labelAnchor )
+  versionLabel.grid( row = 2, column = 0 )
+
+  versionCombobox = ttk.Combobox( initialFrame, textvariable = version, width = comboboxWidth )
+  versionCombobox[ "value" ] = gVersions
+  versionCombobox.bind( "<<ComboboxSelected>>", GetCadenceLibraries )
+  versionCombobox.grid( row = 2, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  layoutLibraryLabel = tk.Label( layoutFrame0, text = "Layout Library", width = labelWidth, anchor = labelAnchor )
+  layoutLibraryLabel.grid( row = 0, column = 0, sticky = "w" )
+
+  layoutLibrary = tk.StringVar()
+  layoutLibraryEntry = tk.Entry( layoutFrame0, textvariable = layoutLibrary, width = entryWidth )
+  layoutLibraryEntry.grid( row = 0, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  layoutLibraryButton = tk.Button( layoutFrame0, text = "Select", command = SelectLayout )
+  layoutLibraryButton.grid( row = 0, column = 2, sticky = "w" )
+
+  layoutTopLabel = tk.Label( layoutFrame0, text = "Layout Top", width = labelWidth, anchor = labelAnchor )
+  layoutTopLabel.grid( row = 1, column = 0, sticky = "w" )
+
+  layoutTop = tk.StringVar()
+  layoutTopEntry = tk.Entry( layoutFrame0, textvariable = layoutTop, width = int( entryWidth / 2 ) )
+  layoutTopEntry.grid( row = 1, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  layoutViewLabel = tk.Label( layoutFrame0, text = "Layout View", width = labelWidth, anchor = labelAnchor )
+  layoutViewLabel.grid( row = 2, column = 0, sticky = "w" )
+
+  layoutView = tk.StringVar()
+  layoutViewEntry = tk.Entry( layoutFrame0, textvariable = layoutView, width = int( entryWidth / 2 ) )
+  layoutViewEntry.grid( row = 2, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  layoutFileLabel = tk.Label( layoutFrame1, text = "Layout File", width = labelWidth, anchor = labelAnchor )
+  layoutFileLabel.grid( row = 0, column = 0, sticky = "w" )
+
+  layoutFile = tk.StringVar()
+  layoutFileEntry = tk.Entry( layoutFrame1, textvariable = layoutFile, width = entryWidth )
+  layoutFileEntry.grid( row = 0, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  layoutFileButton = tk.Button( layoutFrame1, text = "Select", command = SelectLayout )
+  layoutFileButton.grid( row = 0, column = 2, sticky = "w" )
+
+  layoutTopLabel1 = tk.Label( layoutFrame1, text = "Layout Top", width = labelWidth, anchor = labelAnchor )
+  layoutTopLabel1.grid( row = 1, column = 0, sticky = "w" )
+
+  #layoutTop = tk.StringVar()
+  layoutTopEntry1 = tk.Entry( layoutFrame1, textvariable = layoutTop, width = int( entryWidth / 2 ) )
+  layoutTopEntry1.grid( row = 1, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  schematicLibraryLabel = tk.Label( schematicFrame0, text = "Schematic Library", width = labelWidth, anchor = labelAnchor )
+  schematicLibraryLabel.grid( row = 0, column = 0, sticky = "w" )
+
+  schematicLibrary = tk.StringVar()
+  schematicLibraryEntry = tk.Entry( schematicFrame0, textvariable = schematicLibrary, width = entryWidth )
+  schematicLibraryEntry.grid( row = 0, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  schematicLibraryButton = tk.Button( schematicFrame0, text = "Select", command = SelectSchematic )
+  schematicLibraryButton.grid( row = 0, column = 2, sticky = "w" )
+
+  schematicTopLabel = tk.Label( schematicFrame0, text = "Schematic Top", width = labelWidth, anchor = labelAnchor )
+  schematicTopLabel.grid( row = 1, column = 0, sticky = "w" )
+
+  schematicTop = tk.StringVar()
+  schematicTopEntry = tk.Entry( schematicFrame0, textvariable = schematicTop, width = int( entryWidth / 2 ) )
+  schematicTopEntry.grid( row = 1, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  schematicViewLabel = tk.Label( schematicFrame0, text = "Schematic View", width = labelWidth, anchor = labelAnchor )
+  schematicViewLabel.grid( row = 2, column = 0, sticky = "w" )
+
+  schematicView = tk.StringVar()
+  schematicViewEntry = tk.Entry( schematicFrame0, textvariable = schematicView, width = int( entryWidth / 2 ) )
+  schematicViewEntry.grid( row = 2, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  schematicFileLabel = tk.Label( schematicFrame1, text = "Schematic File", width = labelWidth, anchor = labelAnchor )
+  schematicFileLabel.grid( row = 0, column = 0, sticky = "w" )
+
+  schematicFile = tk.StringVar()
+  schematicFileEntry = tk.Entry( schematicFrame1, textvariable = schematicFile, width = entryWidth )
+  schematicFileEntry.grid( row = 0, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  schematicFileButton = tk.Button( schematicFrame1, text = "Select", command = SelectSchematic )
+  schematicFileButton.grid( row = 0, column = 2, sticky = "w" )
+
+  schematicTopLabel1 = tk.Label( schematicFrame1, text = "Schematic Top", width = labelWidth, anchor = labelAnchor )
+  schematicTopLabel1.grid( row = 1, column = 0, sticky = "w" )
+
+  #schematicTop = tk.StringVar()
+  schematicTopEntry1 = tk.Entry( schematicFrame1, textvariable = schematicTop, width = int( entryWidth / 2 ) )
+  schematicTopEntry1.grid( row = 1, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  lvlDatabaseLabel = tk.Label( lvlFrame, text = "LVL Database", width = labelWidth, anchor = labelAnchor )
+  lvlDatabaseLabel.grid( row = 0, column = 0, sticky = "w" )
+
+  lvlDatabase = tk.StringVar()
+  lvlDatabaseEntry = tk.Entry( lvlFrame, textvariable = lvlDatabase, width = entryWidth )
+  lvlDatabaseEntry.grid( row = 0, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  lvlDatabaseButton = tk.Button( lvlFrame, text = "Select", command = SelectLVLDatabase )
+  lvlDatabaseButton.grid( row = 0, column = 2, sticky = "w" )
+
+  lvlTopLabel = tk.Label( lvlFrame, text = "LVL Top", width = labelWidth, anchor = labelAnchor )
+  lvlTopLabel.grid( row = 1, column = 0, sticky = "w" )
+
+  lvlTop = tk.StringVar()
+  lvlTopEntry = tk.Entry( lvlFrame, textvariable = lvlTop, width = int( entryWidth / 2 ) )
+  lvlTopEntry.grid( row = 1, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+
+  runDirectoryLabel = tk.Label( resultFrame, text = "Run Directory", width = labelWidth, anchor = labelAnchor )
+  runDirectoryLabel.grid( row = 0, column = 0, sticky = "w" )
+
+  runDirectory = tk.StringVar()
+  runDirectoryEntry = tk.Entry( resultFrame, textvariable = runDirectory, width = entryWidth )
+  runDirectoryEntry.grid( row = 0, column = 1, ipadx = 5, ipady = 5, sticky = "w" )
+  runDirectoryEntry[ "state" ] = "readonly"
+
+  gdsLabel = tk.Label( resultFrame, text = "GDS", width = labelWidth, anchor = labelAnchor ) ;
+  gdsLabel.grid( row = 1, column = 0, sticky = "w" )
+
+  gdsProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  gdsProgressbar.grid( row = 1, column = 1 )
+
+  gdsViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewGDSLog )
+  gdsViewButton.grid( row = 1, column = 2, sticky = "w" )
+
+  cdlLabel = tk.Label( resultFrame, text = "CDL", width = labelWidth, anchor = labelAnchor ) ;
+  cdlLabel.grid( row = 2, column = 0, sticky = "w" )
+
+  cdlProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  cdlProgressbar.grid( row = 2, column = 1 )
+
+  cdlViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewCDLLog )
+  cdlViewButton.grid( row = 2, column = 2, sticky = "w" )
+
+  drcLabel = tk.Label( resultFrame, text = "DRC", width = labelWidth, anchor = labelAnchor ) ;
+  drcLabel.grid( row = 3, column = 0, sticky = "w" )
+
+  drcProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  drcProgressbar.grid( row =3, column = 1 )
+
+  drcViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewDRCLog )
+  drcViewButton.grid( row = 3, column = 2, sticky = "w" )
+
+  drcRVEButton = tk.Button( resultFrame, text = "RVE", state = "disabled", command = ViewDRCRVE )
+  drcRVEButton.grid( row = 3, column = 3, sticky = "w" )
+
+  antLabel = tk.Label( resultFrame, text = "ANT", width = labelWidth, anchor = labelAnchor ) ;
+  antLabel.grid( row = 4, column = 0, sticky = "w" )
+
+  antProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  antProgressbar.grid( row = 4, column = 1 )
+
+  antViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewANTLog )
+  antViewButton.grid( row = 4, column = 2, sticky = "w" )
+
+  antRVEButton = tk.Button( resultFrame, text = "RVE", state = "disabled", command = ViewANTRVE )
+  antRVEButton.grid( row = 4, column = 3, sticky = "w" )
+
+  lvsLabel = tk.Label( resultFrame, text = "LVS", width = labelWidth, anchor = labelAnchor ) ;
+  lvsLabel.grid( row = 5, column = 0, sticky = "w" )
+
+  lvsProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  lvsProgressbar.grid( row = 5, column = 1 )
+
+  lvsViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewLVSLog )
+  lvsViewButton.grid( row = 5, column = 2, sticky = "w" )
+
+  lvsRVEButton = tk.Button( resultFrame, text = "RVE", state = "disabled", command = ViewLVSRVE )
+  lvsRVEButton.grid( row = 5, column = 3, sticky = "w" )
+
+  ercLabel = tk.Label( resultFrame, text = "ERC", width = labelWidth, anchor = labelAnchor ) ;
+  ercLabel.grid( row = 6, column = 0, sticky = "w" )
+
+  ercProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  ercProgressbar.grid( row = 6, column = 1 )
+
+  ercViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewERCLog )
+  ercViewButton.grid( row = 6, column = 2, sticky = "w" )
+
+  ercRVEButton = tk.Button( resultFrame, text = "RVE", state = "disabled", command = ViewERCRVE )
+  ercRVEButton.grid( row = 6, column = 3, sticky = "w" )
+
+  qrcLabel = tk.Label( resultFrame, text = "QRC", width = labelWidth, anchor = labelAnchor ) ;
+  qrcLabel.grid( row = 7, column = 0, sticky = "w" )
+
+  qrcProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  qrcProgressbar.grid( row = 7, column = 1 )
+
+  qrcViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewQRCLog )
+  qrcViewButton.grid( row = 7, column = 2, sticky = "w" )
+
+  qrcRVEButton = tk.Button( resultFrame, text = "RVE", state = "disabled", command = ViewQRCRVE )
+  qrcRVEButton.grid( row = 7, column = 3, sticky = "w" )
+
+  lvlLabel = tk.Label( resultFrame, text = "LVL", width = labelWidth, anchor = labelAnchor ) ;
+  lvlLabel.grid( row = 8, column = 0, sticky = "w" )
+
+  lvlProgressbar = ttk.Progressbar( resultFrame, length = 650, value = 0, mode = "indeterminate" )
+  lvlProgressbar.grid( row = 8, column = 1 )
+
+  lvlViewButton = tk.Button( resultFrame, text = "VIEW", command = ViewLVLLog )
+  lvlViewButton.grid( row = 8, column = 2, sticky = "w" )
+
+  lvlRVEButton = tk.Button( resultFrame, text = "RVE", state = "disabled", command = ViewLVLRVE )
+  lvlRVEButton.grid( row = 8, column = 3, sticky = "w" )
+
+  uploadButton = tk.Button( functionFrame1, text = "Upload", command = Upload, width = 11, height = 2, bd = 5, activebackground = "green", bg = "gold" )
+  uploadButton.grid( row = 0, column = 0 )
+
+  runButton = tk.Button( functionFrame2, text = "Run", command = Run, width = 11, height = 2, bd = 5, activebackground = "green", bg = "gold" )
+  runButton.grid( row = 0, column = 0 )
+
+  stopButton = tk.Button( functionFrame3, text = "Stop", command = Stop, width = 11, height = 2, bd = 5, activebackground = "red", bg = "gold" )
+  stopButton.grid( row = 0, column = 0 )
+
+  logo = tk.PhotoImage( file = gLogoPath )
+  logoButton = tk.Button( logoFrame, image = logo, command = OpenUserguide, width = 110 )
+  logoButton.grid( row = 0, column = 0 )
+
+  subWindow = tk.Toplevel( window )
+  subWindow.withdraw()
+  subWindow.title( "Choose" )
+  subWindow.geometry( "1000x800" )
+  subWindow.protocol( "WM_DELETE_WINDOW", subWindow.withdraw )
+
+  libraryFrame = tk.Frame( subWindow )
+  libraryFrame.pack( side = "left", fill = "both", expand = "true" )
+
+  topFrame = tk.Frame( subWindow )
+  topFrame.pack( side = "left", fill = "both", expand = "true" )
+
+  viewFrame = tk.Frame( subWindow )
+  viewFrame.pack( side = "left", fill = "both", expand = "true" )
+
+  librarySearchFrame = tk.Frame( libraryFrame )
+  librarySearchFrame.pack( side = "top", fill = "x" )
+
+  libraryListBoxFrame = tk.Frame( libraryFrame, bg = "yellow" )
+  libraryListBoxFrame.pack( side = "top", fill = "both", expand = "true" )
+
+  librarySearchKey = tk.StringVar()
+  librarySearchEntry = tk.Entry( librarySearchFrame, textvariable = librarySearchKey )
+  librarySearchEntry.pack( side = "left", fill = "both", expand = "true" )
+  librarySearchEntry.bind( "<Return>", SearchLibrary )
+
+  librarySearchLogo = tk.PhotoImage( file = gSearchLogoFilePath )
+  #librarySearchLogoButton = tk.Button( librarySearchFrame, image = librarySearchLogo, command = SearchLibrary )
+  librarySearchLogoButton = tk.Button( librarySearchFrame, image = librarySearchLogo )
+  librarySearchLogoButton.pack( side = "left")
+
+  libraryScrollbar = tk.Scrollbar( libraryListBoxFrame, orient = "vertical" )
+  libraryScrollbar.pack( side = "right", fill = "y" )
+
+  libraryListBox = tk.Listbox( libraryListBoxFrame, yscrollcommand = libraryScrollbar.set, selectmode = "SINGLE", selectbackground = "yellow", highlightcolor = "red", exportselection = False )
+  libraryListBox.pack( side = "left", fill = "both", expand = "true" )
+  libraryListBox.bind( "<<ListboxSelect>>", SelectLibraryInListBox )
+
+  topSearchFrame = tk.Frame( topFrame )
+  topSearchFrame.pack( side = "top", fill = "x" )
+
+  topListBoxFrame = tk.Frame( topFrame )
+  topListBoxFrame.pack( side = "top", fill = "both", expand = "true" )
+
+  topSearchKey = tk.StringVar()
+  topSearchEntry = tk.Entry( topSearchFrame, textvariable = topSearchKey )
+  topSearchEntry.pack( side = "left", fill = "both", expand = "true" )
+  topSearchEntry.bind( "<Return>", SearchTop )
+
+  topSearchLogo = tk.PhotoImage( file = gSearchLogoFilePath )
+  #topSearchLogoButton = tk.Button( topSearchFrame, image = topSearchLogo, command = SearchTop )
+  topSearchLogoButton = tk.Button( topSearchFrame, image = topSearchLogo )
+  topSearchLogoButton.pack( side = "left" )
+
+  topScrollbar = tk.Scrollbar( topListBoxFrame, orient = "vertical" )
+  topScrollbar.pack( side = "right", fill = "y" )
+
+  topListBox = tk.Listbox( topListBoxFrame, yscrollcommand = topScrollbar.set, selectmode = "SINGLE", selectbackground = "yellow", highlightcolor = "red", exportselection = True )
+  topListBox.pack( side = "left", fill = "both", expand = "true" )
+  topListBox.bind( "<<ListboxSelect>>", SelectTopInListBox )
+
+  viewSearchFrame = tk.Frame( viewFrame )
+  viewSearchFrame.pack( side = "top", fill = "x" )
+
+  viewListBoxFrame = tk.Frame( viewFrame )
+  viewListBoxFrame.pack( side = "top", fill = "both", expand = "true" )
+
+  viewSearchKey = tk.StringVar()
+  viewSearchEntry = tk.Entry( viewSearchFrame, textvariable = viewSearchKey )
+  viewSearchEntry.pack( side = "left", fill = "both", expand = "true" )
+  viewSearchEntry.bind( "<Return>", SearchView )
+
+  viewSearchLogo = tk.PhotoImage( file = gSearchLogoFilePath )
+  #viewSearchLogoButton = tk.Button( viewSearchFrame, image = viewSearchLogo, command = SearchView )
+  viewSearchLogoButton = tk.Button( viewSearchFrame, image = viewSearchLogo )
+  viewSearchLogoButton.pack( side = "left" )
+
+  viewScrollbar = tk.Scrollbar( viewListBoxFrame, orient = "vertical" )
+  viewScrollbar.pack( side = "right", fill = "y" )
+
+  viewListBox = tk.Listbox( viewListBoxFrame, yscrollcommand = viewScrollbar.set, selectmode = "SINGLE", selectbackground = "yellow", highlightcolor = "red", exportselection = False )
+  viewListBox.pack( side = "left", fill = "both", expand = "true" )
+  viewListBox.bind( "<<ListboxSelect>>", SelectViewInListBox )
+  viewListBox.bind( "<Double-Button-1>", ConfirmSelection )
+
+  libraryScrollbar.config( command = libraryListBox.yview )
+  topScrollbar.config( command = topListBox.yview )
+  viewScrollbar.config( command = viewListBox.yview )
+
+  window.mainloop()
+
